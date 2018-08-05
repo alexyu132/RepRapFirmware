@@ -3303,7 +3303,7 @@ void Platform::UpdateMotorCurrent(size_t driver)
         
 #elif defined(__LPC17xx__)
 
-# ifndef __REARM__ //ReArm has no Current Control
+# if !defined(__REARM__) && !defined(__AZSMZ__) //ReArm has no Current Control
         //Current is in mA
         uint16_t pot = (unsigned short) (current * digipotFactor / 1000);
         if(pot > 256) pot = 255;
@@ -3315,7 +3315,7 @@ void Platform::UpdateMotorCurrent(size_t driver)
             mcp4451.setVolatileWiper(POT_WIPES[driver-4], pot);
 
         }
-# endif //not REARM
+# endif //not REARM or AZSMZ
 
 #else
 		// otherwise we can't set the motor current
@@ -4190,6 +4190,8 @@ void Platform::SetBoardType(BoardType bt)
         board = BoardType::AzteegX5Mini1_1;
 # elif defined(REARM1_0)
         board = BoardType::ReArm1_0;
+# elif defined(AZSMZ)
+		board = BoardType::Azsmz;
 # elif defined(SMOOTHIEBOARD1)
         board = BoardType::Smoothieboard1;
 # else
@@ -4236,7 +4238,8 @@ const char* Platform::GetElectronicsString() const
 #elif defined(__LPC17xx__)
     case BoardType::AzteegX5Mini1_1:        return "AzteegX5 Mini v1.1";
     case BoardType::ReArm1_0:               return "ReArm";
-    case BoardType::Smoothieboard1:          return "SmoothieBoard";
+    case BoardType::Smoothieboard1:         return "SmoothieBoard";
+	case BoardType::Azsmz:					return "AZSMZ Mini";
 #else
 # error Undefined board type
 #endif
@@ -4270,6 +4273,7 @@ const char* Platform::GetBoardString() const
     case BoardType::AzteegX5Mini1_1:        return "AzteegX5Mini1.1";
     case BoardType::ReArm1_0:               return "ReArm";
     case BoardType::Smoothieboard1:         return "SmoothieBoard";
+	case BoardType::Azsmz:					return "AzsmzMini";
 #else
 # error Undefined board type
 #endif

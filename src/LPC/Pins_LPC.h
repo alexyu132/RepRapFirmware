@@ -61,6 +61,8 @@ constexpr size_t NumExtraHeaterProtections = 4;
 # include "variants/Smoothieboard1.h"
 #elif defined(__REARM__)
 # include "variants/ReArm1_0.h"
+#elif defined(__AZSMZ__)
+# include "variants/AZSMZ.h"
 #elif defined(__MBED__)
 //Only used for debugging just use smoothie for now
 # include "variants/Smoothieboard1.h"

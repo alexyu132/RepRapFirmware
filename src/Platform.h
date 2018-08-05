@@ -138,7 +138,8 @@ enum class BoardType : uint8_t
 #elif defined(__LPC17xx__)
     AzteegX5Mini1_1 = 1,
     ReArm1_0 = 2,
-    Smoothieboard1 = 3
+    Smoothieboard1 = 3,
+	Azsmz = 4
 
 #else
 # error Unknown board
