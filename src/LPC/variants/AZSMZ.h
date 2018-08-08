@@ -51,9 +51,9 @@ const size_t MaxDriversPerAxis = 2;				// The maximum number of stepper drivers 
 // The numbers of entries in each array must correspond with the values of DRIVES, AXES, or HEATERS. Set values to NoPin to flag unavailability.
 // DRIVES
 //                                              X      Y      Z     E1     E2
-const Pin ENABLE_PINS[DRIVES] =             { P2_4, P0_10, P0_19, P0_21,  P4_29};
+const Pin ENABLE_PINS[DRIVES] =             { P0_4, P0_10, P0_19, P0_21,  P4_29};
 const Pin STEP_PINS[DRIVES] =               { P2_0,  P2_1,  P2_2,  P2_3,  P2_8};
-const uint8_t STEP_PIN_PORT2_POS[DRIVES] =  { 1,     2,     3,     0,     8}; //SD: Used for calculating bitmap for stepping drivers (this is position of the pins on the port)
+const uint8_t STEP_PIN_PORT2_POS[DRIVES] =  { 0,     1,     2,     3,     8}; //SD: Used for calculating bitmap for stepping drivers (this is position of the pins on the port)
 const uint32_t STEP_DRIVER_MASK =           0x0000010F; //SD: mask of the step pins on Port 2 used for writing to step pins in parallel
 const Pin DIRECTION_PINS[DRIVES] =          { P0_5, P0_11, P0_20, P0_22,  P2_13};
 
@@ -157,8 +157,6 @@ const Pin SpecialPinMap[] =
 //  LPC PIN         RAMPS
     P0_27, //    Aux1  A3/57
     P0_28, //    Aux1  A4/58
-    P1_26, //    Y-Min    14
-    P1_24, //    Z-Min     3
     
 //servos
     P1_18, //    Servo4    4
@@ -167,14 +165,9 @@ const Pin SpecialPinMap[] =
     P1_20, //    Servo1   11
 
 //J3
-    P0_15, // J3
     P0_16, // J3
-    P1_23, // J3          53
     P2_11, // J3          35
-    P1_31, // J3          49
-    P0_18, // J3
     P2_6,  // J3/Aux2  A5/59
-    P0_17, // J3
     P3_25,  // J3          33
     P3_26,  // J3          31
 
