@@ -80,14 +80,14 @@ const Pin END_STOP_PINS[DRIVES] = { P1_24, P1_26, P1_28, NoPin, NoPin}; // E sto
 
 // Analogue pin numbers
 //                                            Bed    H1
-const Pin TEMP_SENSE_PINS[Heaters] = HEATERS_(P0_25, P0_23, /*P0_25*/c, d, e, f, g, h);
+const Pin TEMP_SENSE_PINS[Heaters] = HEATERS_(P0_25, P0_23, /*P0_24*/c, d, e, f, g, h);
 
 
 // Heater outputs
 
 // Note: P2_0 to P2_5 is hardware PWM capable, P2_7 is not
 
-const Pin HEAT_ON_PINS[Heaters] = HEATERS_(P2_5, P2_4, /*P2.4*/c, d, e, f, g, h); // bed, h0
+const Pin HEAT_ON_PINS[Heaters] = HEATERS_(P2_5, P2_4, /*P2.7*/c, d, e, f, g, h); // bed, h0
 
 // Default thermistor betas
 const float BED_R25 = 100000.0;
@@ -144,38 +144,16 @@ const Pin COOLING_FAN_RPM_PIN = NoPin;
 //default to supporting 2 card..... if need 1_23 then change CS no No pin
 
 const size_t NumSdCards = 2;//Note: use 2 even if only using 1 (internal) card
-const Pin SdCardDetectPins[NumSdCards] = { NoPin, /*P1_31*/NoPin };
+const Pin SdCardDetectPins[NumSdCards] = { NoPin, /*P3_25*/NoPin };
 const Pin SdWriteProtectPins[NumSdCards] = { NoPin, NoPin };
-const Pin SdSpiCSPins[NumSdCards] = { P0_6, /*P1_23*/NoPin };// Internal, external. If need 1_23 pin, and no ext sd card set to NoPin Note:: ("slot" 0 in CORE is configured to be LCP SSP1 to match default RRF behaviour)
+const Pin SdSpiCSPins[NumSdCards] = { P0_6, /*P0_16*/NoPin };// Internal, external. If need 1_23 pin, and no ext sd card set to NoPin Note:: ("slot" 0 in CORE is configured to be LCP SSP1 to match default RRF behaviour)
 
 
 // Definition of which pins we allow to be controlled using M42
 
 const Pin SpecialPinMap[] =
 {
-    
-//  LPC PIN         RAMPS
-    P0_27, //    Aux1  A3/57
-    P0_28, //    Aux1  A4/58
-    
-//servos
-    P1_18, //    Servo4    4
-    P1_19, //    Servo3    5
-    P1_21, //    Servo2    6
-    P1_20, //    Servo1   11
-
-//J3
-    P0_16, // J3
-    P2_11, // J3          35
-    P2_6,  // J3/Aux2  A5/59
-    P3_25,  // J3          33
-    P3_26,  // J3          31
-
-//J5
-    P1_22, // J5          41
-    P1_30 // J5          37
-
-
+ NoPin
 };
 
 
