@@ -8,6 +8,8 @@
  */
 
 #include "Move.h"
+#include <cmath>
+#include <limits>
 #include <Platform/RepRap.h>
 #include <GCodes/GCodes.h>
 #include <GCodes/GCodeBuffer/GCodeBuffer.h>
@@ -72,6 +74,7 @@ float Move::SetDriveStepsPerMm(size_t axisOrExtruder, float value, uint32_t requ
 	value = max<float>(value, MinimumStepsPerMm);					// don't allow zero or negative
 	const float ret = value/driveStepsPerMm[axisOrExtruder];
 	driveStepsPerMm[axisOrExtruder] = value;
+	dms[axisOrExtruder].extruderShaper.UpdateStepsPerMm(value);		// nonlinear PA needs mm/step to convert speeds
 	reprap.MoveUpdated();
 	return ret;
 }
@@ -157,17 +160,65 @@ GCodeResult Move::ConfigureMovementQueue(GCodeBuffer& gb, const StringRef& reply
 }
 
 // Process M572
+// Kalico-style reciprocal (nonlinear) pressure advance. Syntax:
+//		M572 D0 S0.05				- single (linear) PA, as before
+//		M572 D0 S0.05 O0.5 V2.5		- reciprocal PA: S is the linear constant
+//		  kLin in seconds, O is the reciprocal offset in mm of filament, V is
+//		  the linearization velocity in mm/s of filament. O and V must be given
+//		  together. V keeps extruder acceleration demands manageable on Bowden
+//		  setups (Kalico suggests 2-3 mm/s there).
+// M572 still waits for standstill before applying a new value; reciprocal PA
+// removes the need for frequent M572 commands, it does not make M572 live.
+// Remote CAN toolboards still use the old single-float protocol, so they get
+// kLin only; the full reciprocal parameters apply on the main board.
 GCodeResult Move::ConfigurePressureAdvance(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeException)
 {
 	if (gb.Seen('S'))
 	{
-		const float advance = gb.GetNonNegativeFValue();
-		if (!reprap.GetGCodes().LockCurrentMovementSystemAndWaitForStandstill(gb))
+		PressureAdvanceParameters params;
+		// Parse first, validate everything, and only then apply: a rejected
+		// M572 leaves the previous known-good values in place. GetFValue()
+		// does not reject NaN/negative/inf on its own, so every value is
+		// checked explicitly for finite + in range below.
+		params.kLin = gb.GetFValue();								// S is the linear constant, in seconds
+		// O (offset, mm of filament) and V (linearization velocity, mm/s of filament) must be given together
+		const bool seenO = gb.Seen('O');
+		params.offset = (seenO) ? gb.GetFValue() : 0.0;
+		const bool seenV = gb.Seen('V');
+		params.vLin = (seenV) ? gb.GetFValue() : 0.0;
+		if (seenO != seenV)
+		{
+			reply.copy("M572 O (offset) and V (linearization velocity) must be given together");
+			return GCodeResult::error;
+		}
+		if (!std::isfinite(params.kLin) || params.kLin < 0.0 || params.kLin > ExtruderShaper::MaxKlinSeconds)
+		{
+			reply.copy("M572 S (linear pressure advance) must be 0 to 2.0 seconds");
+			return GCodeResult::error;
+		}
+		if (!std::isfinite(params.offset) || params.offset < 0.0 || params.offset > ExtruderShaper::MaxOffsetMm)
+		{
+			reply.copy("M572 O (reciprocal offset) must be 0 to 5.0 mm");
+			return GCodeResult::error;
+		}
+		if (seenV && (!std::isfinite(params.vLin) || params.vLin < ExtruderShaper::MinVlinMmPerSec || params.vLin > ExtruderShaper::MaxVlinMmPerSec))
+		{
+			reply.copy("M572 V (linearization velocity) must be 0.1 to 100 mm/s");
+			return GCodeResult::error;
+		}
+		if (seenO && params.kLin + params.offset/params.vLin > ExtruderShaper::MaxEffectiveSeconds)
+		{
+			reply.copy("M572 low-speed pressure advance (S + O/V) exceeds 5.0 s; reduce O or raise V");
+			return GCodeResult::error;
+		}
+
+		if (!reprap.GetGCodes().LockCurrentMovementSystemAndWaitForStandstill(gb))	// don't apply the new PA to moves already queued
 		{
 			return GCodeResult::notFinished;
 		}
 
 		GCodeResult rslt = GCodeResult::ok;
+		bool remoteReciprocalWarn = false;		// set if reciprocal O/V targeted a remote CAN extruder (linear-only there)
 
 #if SUPPORT_CAN_EXPANSION
 		CanDriversData<float> canDriversToUpdate;
@@ -177,23 +228,36 @@ GCodeResult Move::ConfigurePressureAdvance(GCodeBuffer& gb, const StringRef& rep
 			uint32_t eDrive[MaxExtruders];
 			size_t eCount = MaxExtruders;
 			gb.GetUnsignedArray(eDrive, eCount, false);
+			// Validate all extruder numbers first: applying per extruder
+			// inside the loop would partially apply the new PA if a later
+			// index is out of range (review finding F1).
 			for (size_t i = 0; i < eCount; i++)
 			{
-				const uint32_t extruder = eDrive[i];
-				if (extruder >= reprap.GetGCodes().GetNumExtruders())
+				if (eDrive[i] >= reprap.GetGCodes().GetNumExtruders())
 				{
-					reply.printf("Invalid extruder number '%" PRIu32 "'", extruder);
+					reply.printf("Invalid extruder number '%" PRIu32 "'", eDrive[i]);
 					rslt = GCodeResult::error;
 					break;
 				}
-				GetExtruderShaperForExtruder(extruder).SetKseconds(advance);
-#if SUPPORT_CAN_EXPANSION
-				const DriverId did = GetExtruderDriver(extruder);
-				if (did.IsRemote())
+			}
+			if (rslt != GCodeResult::error)
+			{
+				for (size_t i = 0; i < eCount; i++)
 				{
-					canDriversToUpdate.AddEntry(did, advance);
-				}
+					const uint32_t extruder = eDrive[i];
+					GetExtruderShaperForExtruder(extruder).SetParameters(params);
+#if SUPPORT_CAN_EXPANSION
+					const DriverId did = GetExtruderDriver(extruder);
+					if (did.IsRemote())
+					{
+						canDriversToUpdate.AddEntry(did, params.kLin);
+						if (seenO)
+						{
+							remoteReciprocalWarn = true;
+						}
+					}
 #endif
+				}
 			}
 		}
 		else
@@ -207,24 +271,34 @@ GCodeResult Move::ConfigurePressureAdvance(GCodeBuffer& gb, const StringRef& rep
 			else
 			{
 #if SUPPORT_CAN_EXPANSION
-				ct->IterateExtruders([this, advance, &canDriversToUpdate](unsigned int extruder)
+				ct->IterateExtruders([this, &params, &canDriversToUpdate, &remoteReciprocalWarn, seenO](unsigned int extruder)
 										{
-											GetExtruderShaperForExtruder(extruder).SetKseconds(advance);
+											GetExtruderShaperForExtruder(extruder).SetParameters(params);
 											const DriverId did = GetExtruderDriver(extruder);
 											if (did.IsRemote())
 											{
-												canDriversToUpdate.AddEntry(did, advance);
+												canDriversToUpdate.AddEntry(did, params.kLin);
+												if (seenO)
+												{
+													remoteReciprocalWarn = true;
+												}
 											}
 										}
 									);
 #else
-				ct->IterateExtruders([this, advance](unsigned int extruder)
+				ct->IterateExtruders([this, &params](unsigned int extruder)
 										{
-											GetExtruderShaperForExtruder(extruder).SetKseconds(advance);
+											GetExtruderShaperForExtruder(extruder).SetParameters(params);
 										}
 									);
 #endif
 			}
+		}
+
+		if (remoteReciprocalWarn)
+		{
+			reply.cat("Warning: remote CAN extruder(s) run linear-only pressure advance (kLin); reciprocal O/V parameters apply on the main board only");
+			rslt = max<GCodeResult>(rslt, GCodeResult::warning);
 		}
 
 		reprap.MoveUpdated();
@@ -236,11 +310,14 @@ GCodeResult Move::ConfigurePressureAdvance(GCodeBuffer& gb, const StringRef& rep
 #endif
 	}
 
+	// Here if we were not given pressure advance parameters
 	reply.copy("Extruder pressure advance");
 	char c = ':';
 	for (size_t i = 0; i < reprap.GetGCodes().GetNumExtruders(); ++i)
 	{
-		reply.catf("%c %.3f", c, (double)GetExtruderShaperForExtruder(i).GetKseconds());
+		reply.cat(c);
+		reply.cat(' ');
+		GetExtruderShaperForExtruder(i).AppendParameters(reply);
 		c = ',';
 	}
 	return GCodeResult::ok;
@@ -1288,6 +1365,14 @@ void Move::AddMoveFromRemote(const CanMessageMovementLinearShaped& msg) noexcept
 	params.accelDistance =      accelDistanceExTopSpeed + topSpeed * params.accelClocks;
 	const float decelDistance = decelDistanceExTopSpeed + topSpeed * params.decelClocks;
 	params.decelStartDistance =  1.0 - decelDistance;
+
+	// Speeds for nonlinear pressure advance. With constant acceleration a over t clocks,
+	// distance = v0*t + 0.5*a*t^2, and accelDistance above equals topSpeed*t - 0.5*a*t^2,
+	// so v0 = topSpeed - a*t; likewise endSpeed = topSpeed + deceleration*decelClocks.
+	// Only used when this board runs as a CAN expansion board receiving moves from a main board.
+	params.topSpeed = topSpeed;
+	params.startSpeed = topSpeed - params.acceleration * (float)params.accelClocks;
+	params.endSpeed = topSpeed + params.deceleration * (float)params.decelClocks;
 
 	MovementFlags segFlags;
 	segFlags.nonPrintingMove = !msg.usePressureAdvance;

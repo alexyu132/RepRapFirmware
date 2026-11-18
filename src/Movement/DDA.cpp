@@ -137,6 +137,9 @@ void PrepParams::SetFromDDA(const DDA& dda) noexcept
 	decelClocks = lrintf((dda.endSpeed - dda.topSpeed)/deceleration);
 	const float steadyDistance = decelStartDistance - accelDistance;
 	steadyClocks = (steadyDistance <= 0.0) ? 0 : lrintf(steadyDistance/dda.topSpeed);
+	startSpeed = dda.startSpeed;
+	topSpeed = dda.topSpeed;
+	endSpeed = dda.endSpeed;
 	useInputShaping = dda.flags.xyMoving
 					&& !(dda.flags.isolatedMove || dda.flags.isLeadscrewAdjustmentMove
 #if SUPPORT_SCANNING_PROBES
@@ -171,6 +174,7 @@ DDA::DDA(DDA *_ecv_null n) noexcept : next(n), prev(nullptr)
 	flags.all = 0;						// in particular we need to set endCoordinatesValid, usePressureAdvance to false, stateBits to empty, also checkEndstops false for the ATE build
 	SetState(empty);					// should alrrady be covered by the above
 	virtualExtruderPosition = 0.0;
+	maxAccelerationNoPA = maxDecelerationNoPA = 0.0;		// overwritten by Init before use; 0 is the safe default (refinement can only raise up to this, so it never raises)
 	filePos = noFilePosition;
 
 #if SUPPORT_LASER || SUPPORT_IOBITS
@@ -361,6 +365,14 @@ MovementError DDA::InitStandardMove(DDARing& ring, const RawMove &nextMove, bool
 	float accelerations[MaxAxesPlusExtruders];
 	memcpyf(accelerations, move.Accelerations(nextMove.reduceAcceleration), MaxAxesPlusExtruders);
 	bool extrudersMoving = false;
+	// XY acceleration cap imposed by the pressure-advance chord slope, in
+	// mm/step-clock^2 (the same units as maxAcceleration). Computed below
+	// from the chord slope over [0, feed rate] and applied after the
+	// kinematics limits, so the no-PA limits can be stored first and the cap
+	// refined by the lookahead once the actual speeds are known. Starts at
+	// no cap; the min over extruder drives is taken (VectorBoxIntersection
+	// would take the min over all drives anyway).
+	float paCapXY = std::numeric_limits<float>::max();
 
 	for (size_t drive = MaxAxesPlusExtruders - reprap.GetGCodes().GetNumExtruders(); drive < MaxAxesPlusExtruders; ++drive)
 	{
@@ -381,11 +393,44 @@ MovementError DDA::InitStandardMove(DDARing& ring, const RawMove &nextMove, bool
 				}
 				if (flags.xyMoving && nextMove.usePressureAdvance)
 				{
-					const float compensationClocks = move.GetPressureAdvanceClocksForLogicalDrive(drive);
-					if (compensationClocks > 0.0)
+					// Cap the acceleration by the chord slope of D(v) over the move's
+					// actual speed range [0, feed rate], not by the zero-speed maximum
+					// slope. The zero-speed slope (kLin + offset/vLin) is the steepest
+					// point of the reciprocal curve and only applies to infinitesimal
+					// speed intervals near zero; a real move accelerates over a finite
+					// range, so its chord slope is much lower. Using the maximum
+					// capped XY acceleration to ~700 mm/s^2 for a typical Bowden tune
+					// even though the advance actually applied uses the (much lower)
+					// chord slope over each phase's speed range.
+					// This computes the XY cap (paCapXY) but does not apply it here:
+					// it is applied after the kinematics limits below, so the no-PA
+					// limits can be stored first, and it is refined by the lookahead
+					// (RefinePressureAdvanceCap) once the move's actual start/end/top
+					// speeds are known. The cap itself is computed by
+					// ExtruderShaper::GetPressureAdvanceCapXY (via Move), which the
+					// host harness tests with step-clock feed rates, so the units
+					// cannot silently regress: nextMove.feedRate is in mm/step-clock
+					// (RawMove.h), NOT mm/s, and the helper converts it.
+					// Caveat: the move may not reach the requested feed rate (short
+					// move, lookahead), in which case the true chord slope over its
+					// narrower range is higher than the one used here, so the cap is
+					// optimistic for very short low-speed moves. The consequence is
+					// bounded (a possible extruder skip on such a move, not a crash),
+					// and the DDA merges tiny speed changes so infinitesimal intervals
+					// never form an accel phase. Any speed/range we cannot establish
+					// falls back to the zero-speed maximum (safe but conservative).
+					const float linearDistance = sqrtf(directionVector[X_AXIS] * directionVector[X_AXIS]
+														+ directionVector[Y_AXIS] * directionVector[Y_AXIS]
+														+ directionVector[Z_AXIS] * directionVector[Z_AXIS]);
+					if (linearDistance > 0.0)
 					{
-						// Compensation causes instant velocity changes equal to acceleration * k, so we may need to limit the acceleration
-						accelerations[drive] = min<float>(accelerations[drive], move.GetMaxInstantDv(drive)/compensationClocks);
+						// fabsf: a retracting move still advances/retracts at this
+						// magnitude, and the chord slope depends on speed magnitude.
+						const float r = fabsf(movement)/linearDistance;
+						if (r > 0.0)
+						{
+							paCapXY = min<float>(paCapXY, move.GetPressureAdvanceCapXYForLogicalDrive(drive, nextMove.feedRate, nextMove.inverseTimeMode, linearDistance, r));
+						}
 					}
 				}
 			}
@@ -534,6 +579,15 @@ MovementError DDA::InitStandardMove(DDARing& ring, const RawMove &nextMove, bool
 		k.LimitSpeedAndAcceleration(*this, normalisedDirectionVector, numVisibleAxes, flags.continuousRotationShortcut);	// give the kinematics the chance to further restrict the speed and acceleration
 	}
 
+	// Store the acceleration limits before the pressure-advance cap, so the
+	// lookahead can raise them again when it refines the cap from the actual
+	// speeds, then apply the (initial, [0, feed rate]) PA cap. If no extruder
+	// imposed a cap, paCapXY is still the maximum float and the min is a no-op.
+	maxAccelerationNoPA = maxAcceleration;
+	maxDecelerationNoPA = maxDeceleration;
+	maxAcceleration = min<float>(maxAcceleration, paCapXY);
+	maxDeceleration = min<float>(maxDeceleration, paCapXY);
+
 	// 7. Calculate the provisional accelerate and decelerate distances and the top speed
 	endSpeed = 0.0;																// until we have a following move
 
@@ -607,6 +661,7 @@ bool DDA::InitLeadscrewMove(DDARing& ring, float feedrate, const float adjustmen
 	originalFeedRate = 0.0;
 	filePos = prev->filePos;
 	maxAcceleration = maxDeceleration = move.NormalAcceleration(Z_AXIS);
+	maxAccelerationNoPA = maxDecelerationNoPA = maxAcceleration;		// no PA cap on these moves
 
 #if SUPPORT_LASER && SUPPORT_IOBITS
 	if (reprap.GetGCodes().GetMachineType() == MachineType::laser)
@@ -681,6 +736,7 @@ bool DDA::InitAsyncMove(DDARing& ring, const AsyncMove& nextMove) noexcept
 	endSpeed = nextMove.endSpeed;
 	requestedSpeed = nextMove.requestedSpeed;
 	maxAcceleration = maxDeceleration = nextMove.accelDecel;
+	maxAccelerationNoPA = maxDecelerationNoPA = maxAcceleration;		// no PA cap on these moves
 
 # if SUPPORT_LASER || SUPPORT_IOBITS
 	laserPwmOrIoBits.Clear();
@@ -726,6 +782,85 @@ bool DDA::IsAccelerationMove() const noexcept
 #else
 #define LA_DEBUG	do { } while(false)
 #endif
+
+// Recompute the pressure-advance acceleration cap from the move's actual
+// speeds, now that the lookahead has set its start/end speeds and
+// RecalculateMove has set its top speed. The Init-time cap used the chord
+// slope over [0, feed rate] (the move accelerating from rest to the
+// requested speed). A real move usually starts and ends at junction speeds,
+// so the chord over [min(start, end), top] is lower and the cap can be
+// raised: for a typical Bowden tune the 100 mm/s cap goes from ~5,200 to
+// ~8,200 mm/s^2. This only ever RAISES the cap, never lowers it: lowering
+// it here could make an end speed the lookahead already set infeasible (a
+// lookahead error on short moves), whereas the Init-time cap's optimism for
+// very short moves is already documented there and is unchanged. Raising
+// the cap is safe because RecalculateMove recomputes a feasible profile
+// from the new limits. Bounded iteration: raising the accel can raise
+// topSpeed, which lowers the chord and raises the cap further; repeat until
+// the cap stops increasing by more than 1% or 3 passes have run (long moves
+// converge on the first pass because topSpeed is already at the requested
+// speed).
+void DDA::RefinePressureAdvanceCap(DDARing& ring) noexcept
+{
+	if (!flags.xyMoving || !flags.usePressureAdvance || !flags.hasForwardExtrusion)
+	{
+		return;
+	}
+	const Move& move = reprap.GetMove();
+	const size_t numExtruders = reprap.GetGCodes().GetNumExtruders();
+	for (unsigned int pass = 0; pass < 3; ++pass)
+	{
+		// Tightest (lowest) refined XY cap over the extruder drives.
+		float refinedCapXY = std::numeric_limits<float>::max();
+		for (size_t drive = MaxAxesPlusExtruders - numExtruders; drive < MaxAxesPlusExtruders; ++drive)
+		{
+			// directionVector[drive] is the extrusion ratio r (filament mm
+			// per mm of linear movement) after Init normalisation; only
+			// forward extrusion uses pressure advance.
+			const float r = directionVector[drive];
+			if (r <= 0.0 || totalDistance <= 0.0)
+			{
+				continue;
+			}
+			// The cap itself is computed by
+			// ExtruderShaper::GetPressureAdvanceCapXYRange (via Move), which
+			// the host harness tests with step-clock speeds, so the units
+			// cannot silently regress. It returns the maximum float when this
+			// drive imposes no cap, which the min below ignores.
+			refinedCapXY = min<float>(refinedCapXY, move.GetPressureAdvanceCapXYRangeForLogicalDrive(drive, startSpeed, endSpeed, topSpeed, r));
+		}
+		if (refinedCapXY == std::numeric_limits<float>::max())
+		{
+			return;		// no extruder gave a cap
+		}
+		const float newMaxAccel = min<float>(maxAccelerationNoPA, refinedCapXY);
+		const float newMaxDecel = min<float>(maxDecelerationNoPA, refinedCapXY);
+		bool raised = false;
+		if (newMaxAccel > maxAcceleration * 1.01f)
+		{
+			maxAcceleration = newMaxAccel;
+			raised = true;
+		}
+		if (newMaxDecel > maxDeceleration * 1.01f)
+		{
+			maxDeceleration = newMaxDecel;
+			raised = true;
+		}
+		if (!raised)
+		{
+			break;
+		}
+		// If RecalculateMove lowers the limits we just raised (accelerate-only /
+		// decelerate-only short move: the accel is set by the profile, not the
+		// cap), further raising is futile; stop instead of ping-ponging.
+		const float setAccel = maxAcceleration, setDecel = maxDeceleration;
+		RecalculateMove(ring);
+		if (maxAcceleration < setAccel || maxDeceleration < setDecel)
+		{
+			break;
+		}
+	}
+}
 
 // Try to increase the ending speed of this move to allow the next move to start at targetNextSpeed.
 // Only called if this move and the next one (which we have just added) are both printing moves, or both non-printing moves.
@@ -818,6 +953,7 @@ bool DDA::IsAccelerationMove() const noexcept
 
 LA_DEBUG;
 		laDDA->RecalculateMove(ring);
+		laDDA->RefinePressureAdvanceCap(ring);		// raise the PA accel cap now the actual speeds are known
 
 		if (laDepth == 0)
 		{

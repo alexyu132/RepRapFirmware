@@ -315,8 +315,12 @@ public:
 
 	ExtruderShaper& GetExtruderShaperForExtruder(size_t extruder) noexcept;
 	void ClearExtruderMovementPending(size_t extruder) noexcept;
-	float GetPressureAdvanceClocksForLogicalDrive(size_t drive) const noexcept;
-	float GetPressureAdvanceClocksForExtruder(size_t extruder) const noexcept;
+	float GetPressureAdvanceMaxClocksForLogicalDrive(size_t drive) const noexcept;		// max-slope PA, upper bound / fallback for the acceleration cap
+	float GetPressureAdvanceChordClocksForLogicalDrive(size_t drive, float highFilamentSpeedMmPerSec) const noexcept;	// chord-slope PA over [0, filament speed], used to cap acceleration
+	float GetPressureAdvanceChordClocksForLogicalDriveRange(size_t drive, float lowFilamentSpeedMmPerSec, float highFilamentSpeedMmPerSec) const noexcept;	// chord-slope PA over [low, high] filament speeds, used by the lookahead cap refinement
+	float GetPressureAdvanceCapXYForLogicalDrive(size_t drive, float feedRateStepClocks, bool inverseTimeMode, float linearDistanceMm, float r) const noexcept;	// XY accel cap (mm/step-clock^2) from the PA chord over [0, feed rate], used by the DDA Init cap
+	float GetPressureAdvanceCapXYRangeForLogicalDrive(size_t drive, float startSpeedStepClocks, float endSpeedStepClocks, float topSpeedStepClocks, float r) const noexcept;	// refined XY accel cap (mm/step-clock^2) from the PA chord over [min(start, end), top], used by the lookahead cap refinement
+	float GetPressureAdvanceKlinClocksForExtruder(size_t extruder) const noexcept;		// configured linear PA constant (kLin), reported by the object model
 
 #if SUPPORT_REMOTE_COMMANDS
 	GCodeResult EutSetMotorCurrents(const CanMessageMultipleDrivesRequest<float>& msg, size_t dataLength, const StringRef& reply) noexcept;
@@ -922,14 +926,34 @@ inline ExtruderShaper& Move::GetExtruderShaperForExtruder(size_t extruder) noexc
 	return dms[ExtruderToLogicalDrive(extruder)].extruderShaper;
 }
 
-inline float Move::GetPressureAdvanceClocksForLogicalDrive(size_t drive) const noexcept
+inline float Move::GetPressureAdvanceMaxClocksForLogicalDrive(size_t drive) const noexcept
 {
-	return dms[drive].extruderShaper.GetKclocks();
+	return dms[drive].extruderShaper.GetMaxAdvanceClocks();
 }
 
-inline float Move::GetPressureAdvanceClocksForExtruder(size_t extruder) const noexcept
+inline float Move::GetPressureAdvanceChordClocksForLogicalDrive(size_t drive, float highFilamentSpeedMmPerSec) const noexcept
 {
-	return (extruder < MaxExtruders) ? GetPressureAdvanceClocksForLogicalDrive(ExtruderToLogicalDrive(extruder)) : 0.0;
+	return dms[drive].extruderShaper.GetChordSlopeToFilamentSpeed(highFilamentSpeedMmPerSec);
+}
+
+inline float Move::GetPressureAdvanceChordClocksForLogicalDriveRange(size_t drive, float lowFilamentSpeedMmPerSec, float highFilamentSpeedMmPerSec) const noexcept
+{
+	return dms[drive].extruderShaper.GetChordSlopeFilamentRange(lowFilamentSpeedMmPerSec, highFilamentSpeedMmPerSec);
+}
+
+inline float Move::GetPressureAdvanceCapXYForLogicalDrive(size_t drive, float feedRateStepClocks, bool inverseTimeMode, float linearDistanceMm, float r) const noexcept
+{
+	return dms[drive].extruderShaper.GetPressureAdvanceCapXY(feedRateStepClocks, inverseTimeMode, linearDistanceMm, r, GetMaxInstantDv(drive));
+}
+
+inline float Move::GetPressureAdvanceCapXYRangeForLogicalDrive(size_t drive, float startSpeedStepClocks, float endSpeedStepClocks, float topSpeedStepClocks, float r) const noexcept
+{
+	return dms[drive].extruderShaper.GetPressureAdvanceCapXYRange(startSpeedStepClocks, endSpeedStepClocks, topSpeedStepClocks, r, GetMaxInstantDv(drive));
+}
+
+inline float Move::GetPressureAdvanceKlinClocksForExtruder(size_t extruder) const noexcept
+{
+	return (extruder < MaxExtruders) ? dms[ExtruderToLogicalDrive(extruder)].extruderShaper.GetKlinClocks() : 0.0;
 }
 
 // Schedule the next interrupt, returning true if we can't because it is already due

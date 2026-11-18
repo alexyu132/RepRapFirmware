@@ -32,6 +32,7 @@ struct PrepParams
 	float accelDistance;
 	float decelStartDistance;
 	float totalDistance;
+	motioncalc_t startSpeed, topSpeed, endSpeed;	// the speeds reached, in mm per step clock; used for nonlinear pressure advance
 	bool useInputShaping;
 
 	uint32_t TotalAccelClocks() const noexcept { return accelClocks; }
@@ -179,6 +180,7 @@ private:
 	static constexpr float MinimumAccelOrDecelClocks = 10.0;				// Minimum number of acceleration or deceleration clocks we try to ensure
 
 	MovementError RecalculateMove(DDARing& ring) noexcept SPEED_CRITICAL;
+	void RefinePressureAdvanceCap(DDARing& ring) noexcept SPEED_CRITICAL;	// Recompute the PA acceleration cap from the actual speeds once the lookahead has set them
 	static void DoLookahead(DDARing& ring, DDA *laDDA) noexcept SPEED_CRITICAL;	// Try to smooth out moves in the queue
 
 	void MatchSpeeds() noexcept SPEED_CRITICAL;
@@ -249,6 +251,7 @@ private:
 	float directionVector[MaxAxesPlusExtruders];	// The normalised direction vector - first 3 are XYZ Cartesian coordinates even on a delta
     float totalDistance;							// How long is the move in hypercuboid space
     float maxAcceleration, maxDeceleration;			// The maximum acceleration and deceleration to use, always positive
+    float maxAccelerationNoPA, maxDecelerationNoPA;	// The same limits before the pressure-advance cap is applied, so the lookahead can raise them again when it refines the cap
     float requestedSpeed;							// The speed that the user asked for
     float virtualExtruderPosition;					// the virtual extruder position at the end of this move, used for pause/resume
 
